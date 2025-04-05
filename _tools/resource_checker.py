@@ -12,15 +12,20 @@ def list_vm_instances(project_id: str) -> list[dict]:
 
     resources = []
     for instance in instances:
+        internal_ips = []
+        external_ips = []
         for interface in instance.get("networkInterfaces", []):
-            vm = {
+            internal_ips.append(interface["networkIP"])
+            access_configs = interface.get("accessConfigs", [])
+            external_ips += list(map(lambda x: x["natIP"], access_configs))
+
+        resources.append(
+            {
                 "Type": "VM",
                 "Name": instance["name"],
+                "Endpoint": ", ".join(internal_ips + external_ips),
             }
-            access_configs = interface.get("accessConfigs", [])
-            external_ips = map(lambda x: x["natIP"], access_configs)
-            vm["Endpoint"] = ", ".join(external_ips) if external_ips else ""
-            resources.append(vm)
+        )
 
     return resources
 
@@ -32,15 +37,15 @@ def list_cloud_run_services(project_id: str) -> list[dict]:
 
     resources = []
     for service in services:
-        if (
-            service["metadata"]["annotations"].get("run.googleapis.com/client-name")
-            == "cloudfunctions"
-        ):
-            continue
+        resource_type = (
+            "Cloud Run Functions"
+            if service["metadata"]["labels"].get("goog-managed-by") == "cloudfunctions"
+            else "Cloud Run Services"
+        )
 
         resources.append(
             {
-                "Type": "Cloud Run Services",
+                "Type": resource_type,
                 "Name": service["metadata"]["name"],
                 "Endpoint": service["status"]["url"],
             }
@@ -49,21 +54,48 @@ def list_cloud_run_services(project_id: str) -> list[dict]:
     return resources
 
 
-def list_cloud_run_functions(project_id: str) -> list[dict]:
-    cmd = f"gcloud functions list --project={project_id} --format=json"
+def list_bigtable_instances(project_id: str) -> list[dict]:
+    cmd = f"gcloud bigtable instances list --project={project_id} --format=json"
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    functions = json.loads(result.stdout)
+    instances = json.loads(result.stdout)
 
     resources = []
-    for function in functions:
+    for instance in instances:
         resources.append(
             {
-                "Type": "Cloud Run Functions",
-                "Name": function["name"].split("/")[-1],
-                "Endpoint": function["url"],
+                "Type": "Bigtable",
+                "Name": instance["displayName"],
+                "Endpoint": "",
             }
         )
 
+    return resources
+
+
+def list_storage_buckets(project_id: str) -> list[dict]:
+    cmd = f"gcloud storage buckets list --project={project_id} --format=json"
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    buckets = json.loads(result.stdout)
+
+    resources = []
+    for bucket in buckets:
+        resources.append(
+            {
+                "Type": "Storage",
+                "Name": bucket["name"],
+                "Endpoint": bucket["storage_url"],
+            }
+        )
+
+    return resources
+
+
+def list_resources(project_id: str) -> list[dict]:
+    resources = []
+    resources += list_vm_instances(project_id)
+    resources += list_cloud_run_services(project_id)
+    resources += list_bigtable_instances(project_id)
+    resources += list_storage_buckets(project_id)
     return resources
 
 
@@ -73,10 +105,7 @@ def main():
     args = parser.parse_args()
     project_id = args.project_id
 
-    vms = list_vm_instances(project_id)
-    cloud_run_services = list_cloud_run_services(project_id)
-    cloud_run_functions = list_cloud_run_functions(project_id)
-    resources = vms + cloud_run_services + cloud_run_functions
+    resources = list_resources(project_id)
 
     if len(resources) > 0:
         df = pd.DataFrame(resources)
